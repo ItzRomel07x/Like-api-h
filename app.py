@@ -8,6 +8,10 @@ import aiohttp
 import requests
 import json
 import os
+import random
+import uuid
+import string
+from datetime import datetime, date
 from pymongo import MongoClient
 import like_pb2
 import like_count_pb2
@@ -26,6 +30,107 @@ def get_mongo_db():
         mongo_client = MongoClient(MONGODB_URI)
         db = mongo_client.get_database('test')
     return db
+
+def generate_api_key():
+    """Generate a unique API key"""
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=32))
+
+def create_api_key(quota=100):
+    """Create a new API key with quota"""
+    try:
+        database = get_mongo_db()
+        collection = database['api_keys']
+        
+        api_key = generate_api_key()
+        key_data = {
+            'api_key': api_key,
+            'quota': quota,
+            'used': 0,
+            'created_at': datetime.now(),
+            'last_reset_date': date.today().isoformat(),
+            'active': True
+        }
+        
+        collection.insert_one(key_data)
+        app.logger.info(f"Created API key with quota {quota}")
+        return api_key
+    except Exception as e:
+        app.logger.error(f"Error creating API key: {e}")
+        return None
+
+def validate_api_key(api_key):
+    """Validate API key and return key data"""
+    try:
+        database = get_mongo_db()
+        collection = database['api_keys']
+        
+        key_data = collection.find_one({'api_key': api_key, 'active': True})
+        if not key_data:
+            return None
+        
+        # Check if it's a new day and reset quota if needed
+        last_reset = key_data.get('last_reset_date')
+        today = date.today().isoformat()
+        
+        if last_reset != today:
+            # Reset quota for new day
+            collection.update_one(
+                {'api_key': api_key},
+                {
+                    '$set': {
+                        'used': 0,
+                        'last_reset_date': today
+                    }
+                }
+            )
+            app.logger.info(f"Daily quota reset for API key {api_key}")
+            key_data['used'] = 0
+            key_data['last_reset_date'] = today
+        
+        return key_data
+    except Exception as e:
+        app.logger.error(f"Error validating API key: {e}")
+        return None
+
+def check_and_increment_quota(api_key):
+    """Check if quota is available and increment used count"""
+    try:
+        database = get_mongo_db()
+        collection = database['api_keys']
+        
+        key_data = collection.find_one({'api_key': api_key, 'active': True})
+        if not key_data:
+            return False, "Invalid API key"
+        
+        # Check if it's a new day and reset quota if needed
+        last_reset = key_data.get('last_reset_date')
+        today = date.today().isoformat()
+        
+        if last_reset != today:
+            # Reset quota for new day
+            collection.update_one(
+                {'api_key': api_key},
+                {
+                    '$set': {
+                        'used': 0,
+                        'last_reset_date': today
+                    }
+                }
+            )
+            app.logger.info(f"Daily quota reset for API key {api_key}")
+            key_data['used'] = 0
+        
+        if key_data['used'] >= key_data['quota']:
+            return False, f"Quota exceeded. Used: {key_data['used']}/{key_data['quota']}"
+        
+        collection.update_one(
+            {'api_key': api_key},
+            {'$inc': {'used': 1}}
+        )
+        return True, f"Requests remaining: {key_data['quota'] - key_data['used'] - 1}/{key_data['quota']}"
+    except Exception as e:
+        app.logger.error(f"Error checking quota: {e}")
+        return False, str(e)
 
 def load_tokens(server_name):
     try:
@@ -184,82 +289,215 @@ def decode_protobuf(binary):
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
         return None
 
+@app.route('/create-api-key', methods=['POST', 'GET'])
+def create_key():
+    """Create a new API key with specified quota"""
+    try:
+        if request.method == 'POST':
+            data = request.get_json() or {}
+            quota = data.get('quota', 100)
+        else:  # GET method
+            quota = request.args.get('quota', 100)
+        
+        try:
+            quota = int(quota)
+        except (ValueError, TypeError):
+            return jsonify({"error": "Quota must be a valid integer"}), 400
+        
+        if quota < 1:
+            return jsonify({"error": "Quota must be a positive integer"}), 400
+        
+        api_key = create_api_key(quota)
+        if not api_key:
+            return jsonify({"error": "Failed to create API key"}), 500
+        
+        return jsonify({
+            "api_key": api_key,
+            "quota": quota,
+            "message": "API key created successfully"
+        }), 201
+    except Exception as e:
+        app.logger.error(f"Error in create_key: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api-key-status', methods=['GET'])
+def api_key_status():
+    """Check API key status and remaining quota"""
+    try:
+        api_key = request.args.get('api_key')
+        if not api_key:
+            return jsonify({"error": "api_key parameter required"}), 400
+        
+        key_data = validate_api_key(api_key)
+        if not key_data:
+            return jsonify({"error": "Invalid API key"}), 401
+        
+        return jsonify({
+            "quota": key_data['quota'],
+            "used": key_data['used'],
+            "remaining": key_data['quota'] - key_data['used'],
+            "active": key_data['active']
+        }), 200
+    except Exception as e:
+        app.logger.error(f"Error in api_key_status: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/like', methods=['GET'])
 def handle_requests():
     uid = request.args.get("uid")
     server_name = request.args.get("server_name", "").upper()
-    if not uid or not server_name:
-        return jsonify({"error": "UID and server_name are required"}), 400
+    api_key = request.args.get("api_key")
+    
+    if not uid or not server_name or not api_key:
+        return jsonify({"error": "uid, server_name, and api_key are required"}), 400
 
-    try:
-        def process_request():
+    # Validate API key
+    key_data = validate_api_key(api_key)
+    if not key_data:
+        return jsonify({"error": "Invalid or inactive API key"}), 401
+    
+    # Check if quota is available
+    quota_available = key_data['used'] < key_data['quota']
+    
+    if quota_available:
+        # Quota available - process real request with all tokens
+        quota_ok, quota_msg = check_and_increment_quota(api_key)
+        if not quota_ok:
+            return jsonify({"error": quota_msg}), 429
+
+        try:
+            def process_real_request():
+                tokens = load_tokens(server_name)
+                if tokens is None:
+                    raise Exception("Failed to load tokens.")
+                
+                # Randomly select one token for initial check
+                token = random.choice(tokens)['token']
+                
+                encrypted_uid = enc(uid)
+                if encrypted_uid is None:
+                    raise Exception("Encryption of UID failed.")
+
+                before = make_request(encrypted_uid, server_name, token)
+                if before is None:
+                    raise Exception("Failed to retrieve initial player info.")
+                try:
+                    jsone = MessageToJson(before)
+                except Exception as e:
+                    raise Exception(f"Error converting 'before' protobuf to JSON: {e}")
+                data_before = json.loads(jsone)
+                before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
+                try:
+                    before_like = int(before_like)
+                except Exception:
+                    before_like = 0
+                app.logger.info(f"Likes before command: {before_like}")
+
+                if server_name == "IND":
+                    url = "https://client.ind.freefiremobile.com/LikeProfile"
+                elif server_name in {"BR", "US", "SAC", "NA"}:
+                    url = "https://client.us.freefiremobile.com/LikeProfile"
+                else:
+                    url = "https://clientbp.ggblueshark.com/LikeProfile"
+
+                _, tokens_used = asyncio.run(send_multiple_requests(uid, server_name, url))
+
+                after = make_request(encrypted_uid, server_name, token)
+                if after is None:
+                    raise Exception("Failed to retrieve player info after like requests.")
+                try:
+                    jsone_after = MessageToJson(after)
+                except Exception as e:
+                    raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
+                data_after = json.loads(jsone_after)
+                after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
+                player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
+                player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
+                
+                like_given = after_like - before_like
+                
+                status = 1 if like_given != 0 else 2
+                result = {
+                    "API": "Mohit Like API",
+                    "LikesGivenByAPI": like_given,
+                    "LikesafterCommand": after_like,
+                    "LikesbeforeCommand": before_like,
+                    "PlayerNickname": player_name,
+                    "UID": player_uid,
+                    "TokensUsed": tokens_used,
+                    "status": status
+                }
+                return result
+
+            result = process_real_request()
+            response = app.response_class(
+                response=json.dumps(result, ensure_ascii=False),
+                status=200,
+                mimetype='application/json'
+            )
+            return response
+        except Exception as e:
+            app.logger.error(f"Error processing request: {e}")
+            return jsonify({"error": str(e)}), 500
+    else:
+        # Quota exceeded - get real data from database tokens and add fake likes
+        try:
             tokens = load_tokens(server_name)
-            if tokens is None:
-                raise Exception("Failed to load tokens.")
-            token = tokens[0]['token']
+            if tokens is None or len(tokens) == 0:
+                return jsonify({"error": "No tokens available"}), 500
+            
+            # Randomly select one token from database
+            token = random.choice(tokens)['token']
+            app.logger.info(f"Using random token from database for quota exceeded response")
+            
             encrypted_uid = enc(uid)
             if encrypted_uid is None:
-                raise Exception("Encryption of UID failed.")
-
-            before = make_request(encrypted_uid, server_name, token)
-            if before is None:
-                raise Exception("Failed to retrieve initial player info.")
+                return jsonify({"error": "Encryption failed"}), 500
+            
+            # Get real player data using the token
+            player_data = make_request(encrypted_uid, server_name, token)
+            if player_data is None:
+                return jsonify({"error": "Failed to fetch player data"}), 500
+            
             try:
-                jsone = MessageToJson(before)
+                jsone_data = MessageToJson(player_data)
             except Exception as e:
-                raise Exception(f"Error converting 'before' protobuf to JSON: {e}")
-            data_before = json.loads(jsone)
-            before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
-            try:
-                before_like = int(before_like)
-            except Exception:
-                before_like = 0
-            app.logger.info(f"Likes before command: {before_like}")
-
-            if server_name == "IND":
-                url = "https://client.ind.freefiremobile.com/LikeProfile"
-            elif server_name in {"BR", "US", "SAC", "NA"}:
-                url = "https://client.us.freefiremobile.com/LikeProfile"
-            else:
-                url = "https://clientbp.ggblueshark.com/LikeProfile"
-
-            _, tokens_used = asyncio.run(send_multiple_requests(uid, server_name, url))
-
-            after = make_request(encrypted_uid, server_name, token)
-            if after is None:
-                raise Exception("Failed to retrieve player info after like requests.")
-            try:
-                jsone_after = MessageToJson(after)
-            except Exception as e:
-                raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
-            data_after = json.loads(jsone_after)
-            after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
-            player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
-            player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
-            like_given = after_like - before_like
-            status = 1 if like_given != 0 else 2
+                return jsonify({"error": f"Error converting data: {e}"}), 500
+            
+            data_dict = json.loads(jsone_data)
+            real_nickname = str(data_dict.get('AccountInfo', {}).get('PlayerNickname', f"Player_{uid}"))
+            real_likes = int(data_dict.get('AccountInfo', {}).get('Likes', 0))
+            
+            app.logger.info(f"Got real data - nickname: {real_nickname}, likes: {real_likes}")
+            
+            # Add random fake likes (160-170)
+            fake_likes = random.randint(160, 170)
+            final_likes = real_likes + fake_likes
+            
             result = {
                 "API": "Mohit Like API",
-                "LikesGivenByAPI": like_given,
-                "LikesafterCommand": after_like,
-                "LikesbeforeCommand": before_like,
-                "PlayerNickname": player_name,
-                "UID": player_uid,
-                "TokensUsed": tokens_used,
-                "status": status
+                "LikesGivenByAPI": fake_likes,
+                "LikesafterCommand": final_likes,
+                "LikesbeforeCommand": real_likes,
+                "PlayerNickname": real_nickname,
+                "UID": int(uid),
+                "TokensUsed": 0,
+                "status": 1
             }
-            return result
+            response = app.response_class(
+                response=json.dumps(result, ensure_ascii=False),
+                status=200,
+                mimetype='application/json'
+            )
+            return response
+        except Exception as e:
+            app.logger.error(f"Error generating fake response: {e}")
+            return jsonify({"error": str(e)}), 500
 
-        result = process_request()
-        response = app.response_class(
-            response=json.dumps(result, ensure_ascii=False),
-            status=200,
-            mimetype='application/json'
-        )
-        return response
-    except Exception as e:
-        app.logger.error(f"Error processing request: {e}")
-        return jsonify({"error": str(e)}), 500
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "ok"}), 200
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

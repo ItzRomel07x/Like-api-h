@@ -11,3 +11,17 @@ cachetools
 pymongo
 dnspython
 gunicorn
+aiohttp
+cachetools
+crypto
+dnspython
+Flask[async]
+flask-cors
+googleapis-common-protos
+gunicorn
+httpx
+protobuf
+pycryptodome
+pymongo
+requests
+Werkzeug
