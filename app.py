@@ -440,59 +440,12 @@ def handle_requests():
             app.logger.error(f"Error processing request: {e}")
             return jsonify({"error": str(e)}), 500
     else:
-        # Quota exceeded - get real data from database tokens and add fake likes
-        try:
-            tokens = load_tokens(server_name)
-            if tokens is None or len(tokens) == 0:
-                return jsonify({"error": "No tokens available"}), 500
-            
-            # Randomly select one token from database
-            token = random.choice(tokens)['token']
-            app.logger.info(f"Using random token from database for quota exceeded response")
-            
-            encrypted_uid = enc(uid)
-            if encrypted_uid is None:
-                return jsonify({"error": "Encryption failed"}), 500
-            
-            # Get real player data using the token
-            player_data = make_request(encrypted_uid, server_name, token)
-            if player_data is None:
-                return jsonify({"error": "Failed to fetch player data"}), 500
-            
-            try:
-                jsone_data = MessageToJson(player_data)
-            except Exception as e:
-                return jsonify({"error": f"Error converting data: {e}"}), 500
-            
-            data_dict = json.loads(jsone_data)
-            real_nickname = str(data_dict.get('AccountInfo', {}).get('PlayerNickname', f"Player_{uid}"))
-            real_likes = int(data_dict.get('AccountInfo', {}).get('Likes', 0))
-            
-            app.logger.info(f"Got real data - nickname: {real_nickname}, likes: {real_likes}")
-            
-            # Add random fake likes (160-170)
-            fake_likes = random.randint(160, 170)
-            final_likes = real_likes + fake_likes
-            
-            result = {
-                "API": "Mohit Like API",
-                "LikesGivenByAPI": fake_likes,
-                "LikesafterCommand": final_likes,
-                "LikesbeforeCommand": real_likes,
-                "PlayerNickname": real_nickname,
-                "UID": int(uid),
-                "TokensUsed": 0,
-                "status": 1
-            }
-            response = app.response_class(
-                response=json.dumps(result, ensure_ascii=False),
-                status=200,
-                mimetype='application/json'
-            )
-            return response
-        except Exception as e:
-            app.logger.error(f"Error generating fake response: {e}")
-            return jsonify({"error": str(e)}), 500
+        # Quota exceeded - return informative message
+        return jsonify({
+            "status": 2,
+            "error": "Your today like send limit reached come tomorrow",
+            "message": "Daily quota exceeded"
+        }), 429
 
 @app.route('/health', methods=['GET'])
 def health():
