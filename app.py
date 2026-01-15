@@ -11,7 +11,7 @@ import os
 import random
 import uuid
 import string
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pymongo import MongoClient
 import like_pb2
 import like_count_pb2
@@ -183,15 +183,15 @@ async def send_request(encrypted_uid, token, url):
     try:
         edata = bytes.fromhex(encrypted_uid)
         headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/UP1A.231005.007)",
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 9 Pro Build/AD1A.240505.001)",
             'Connection': "Keep-Alive",
             'Accept-Encoding': "gzip",
             'Authorization': f"Bearer {token}",
             'Content-Type': "application/octet-stream",
             'Expect': "100-continue",
-            'X-Unity-Version': "2018.4.11f1",
+            'X-Unity-Version': "2022.3.10f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB51"
+            'ReleaseVersion': "OB52"
         }
         async with aiohttp.ClientSession() as session:
             async with session.post(url, data=edata, headers=headers) as response:
@@ -256,15 +256,15 @@ def make_request(encrypt, server_name, token):
             url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
         edata = bytes.fromhex(encrypt)
         headers = {
-            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 8 Build/UP1A.231005.007)",
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 9 Pro Build/AD1A.240505.001)",
             'Connection': "Keep-Alive",
             'Accept-Encoding': "gzip",
             'Authorization': f"Bearer {token}",
             'Content-Type': "application/octet-stream",
             'Expect': "100-continue",
-            'X-Unity-Version': "2018.4.11f1",
+            'X-Unity-Version': "2022.3.10f1",
             'X-GA': "v1 1",
-            'ReleaseVersion': "OB51"
+            'ReleaseVersion': "OB52"
         }
         response = requests.post(url, data=edata, headers=headers, verify=False)
         hex_data = response.content.hex()
@@ -287,6 +287,39 @@ def decode_protobuf(binary):
         return None
     except Exception as e:
         app.logger.error(f"Unexpected error during protobuf decoding: {e}")
+        return None
+
+async def make_request_async(encrypt, server_name, token):
+    try:
+        if server_name == "IND":
+            url = "https://client.ind.freefiremobile.com/GetPlayerPersonalShow"
+        elif server_name in {"BR", "US", "SAC", "NA"}:
+            url = "https://client.us.freefiremobile.com/GetPlayerPersonalShow"
+        else:
+            url = "https://clientbp.ggblueshark.com/GetPlayerPersonalShow"
+        edata = bytes.fromhex(encrypt)
+        headers = {
+            'User-Agent': "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 9 Pro Build/AD1A.240505.001)",
+            'Connection': "Keep-Alive",
+            'Accept-Encoding': "gzip",
+            'Authorization': f"Bearer {token}",
+            'Content-Type': "application/octet-stream",
+            'Expect': "100-continue",
+            'X-Unity-Version': "2022.3.10f1",
+            'X-GA': "v1 1",
+            'ReleaseVersion': "OB52"
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=edata, headers=headers) as response:
+                content = await response.read()
+                hex_data = content.hex()
+                binary = bytes.fromhex(hex_data)
+                decode = decode_protobuf(binary)
+                if decode is None:
+                    app.logger.error("Protobuf decoding returned None.")
+                return decode
+    except Exception as e:
+        app.logger.error(f"Error in make_request_async: {e}")
         return None
 
 @app.route('/create-api-key', methods=['POST', 'GET'])
@@ -366,7 +399,7 @@ def handle_requests():
             return jsonify({"error": quota_msg}), 429
 
         try:
-            def process_real_request():
+            async def process_real_request_async():
                 tokens = load_tokens(server_name)
                 if tokens is None:
                     raise Exception("Failed to load tokens.")
@@ -378,19 +411,17 @@ def handle_requests():
                 if encrypted_uid is None:
                     raise Exception("Encryption of UID failed.")
 
-                before = make_request(encrypted_uid, server_name, token)
+                # Initial and like requests can be somewhat parallelized but initial check is usually needed for 'before' count
+                before = await make_request_async(encrypted_uid, server_name, token)
                 if before is None:
                     raise Exception("Failed to retrieve initial player info.")
+                
                 try:
                     jsone = MessageToJson(before)
                 except Exception as e:
                     raise Exception(f"Error converting 'before' protobuf to JSON: {e}")
                 data_before = json.loads(jsone)
-                before_like = data_before.get('AccountInfo', {}).get('Likes', 0)
-                try:
-                    before_like = int(before_like)
-                except Exception:
-                    before_like = 0
+                before_like = int(data_before.get('AccountInfo', {}).get('Likes', 0))
                 app.logger.info(f"Likes before command: {before_like}")
 
                 if server_name == "IND":
@@ -400,24 +431,31 @@ def handle_requests():
                 else:
                     url = "https://clientbp.ggblueshark.com/LikeProfile"
 
-                _, tokens_used = asyncio.run(send_multiple_requests(uid, server_name, url))
+                # Send multiple requests in parallel
+                results_task = send_multiple_requests(uid, server_name, url)
+                
+                # Wait for likes to be sent
+                _, tokens_used = await results_task
 
-                after = make_request(encrypted_uid, server_name, token)
+                # Get final count
+                after = await make_request_async(encrypted_uid, server_name, token)
                 if after is None:
                     raise Exception("Failed to retrieve player info after like requests.")
+                
                 try:
                     jsone_after = MessageToJson(after)
                 except Exception as e:
                     raise Exception(f"Error converting 'after' protobuf to JSON: {e}")
                 data_after = json.loads(jsone_after)
+                
                 after_like = int(data_after.get('AccountInfo', {}).get('Likes', 0))
                 player_uid = int(data_after.get('AccountInfo', {}).get('UID', 0))
                 player_name = str(data_after.get('AccountInfo', {}).get('PlayerNickname', ''))
                 
                 like_given = after_like - before_like
-                
                 status = 1 if like_given != 0 else 2
-                result = {
+                
+                return {
                     "API": "Mohit Like API",
                     "LikesGivenByAPI": like_given,
                     "LikesafterCommand": after_like,
@@ -427,9 +465,9 @@ def handle_requests():
                     "TokensUsed": tokens_used,
                     "status": status
                 }
-                return result
 
-            result = process_real_request()
+            # Use asyncio to run the async process
+            result = asyncio.run(process_real_request_async())
             response = app.response_class(
                 response=json.dumps(result, ensure_ascii=False),
                 status=200,
@@ -447,10 +485,64 @@ def handle_requests():
             "message": "Daily quota exceeded"
         }), 429
 
+@app.route('/token-count', methods=['GET'])
+def get_token_count():
+    """Get count of JWT tokens from all region collections"""
+    try:
+        database = get_mongo_db()
+        regions = ['region_IND', 'region_BR', 'region_ME']
+        summary = {}
+        total = 0
+        
+        for region in regions:
+            count = database[region].count_documents({})
+            summary[region] = count
+            total += count
+            
+        return jsonify({
+            "counts": summary,
+            "total_tokens": total
+        }), 200
+    except Exception as e:
+        app.logger.error(f"Error counting tokens: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint"""
     return jsonify({"status": "ok"}), 200
+
+@app.route('/cleanup-tokens', methods=['POST', 'GET'])
+def cleanup_tokens():
+    """Remove JWT tokens older than 6 hours from all region collections"""
+    try:
+        database = get_mongo_db()
+        six_hours_ago = datetime.now() - timedelta(hours=6)
+        
+        regions = ['region_IND', 'region_BR', 'region_ME']
+        summary = {}
+        
+        for region in regions:
+            collection = database[region]
+            # Assuming tokens have a 'created_at' or similar timestamp field.
+            # If not, we might need to rely on MongoDB's _id if it's an ObjectId.
+            # Given the previous code, it's safer to check for common timestamp fields
+            # or use the _id timestamp if they are standard ObjectIds.
+            
+            result = collection.delete_many({
+                'created_at': {'$lt': six_hours_ago}
+            })
+            summary[region] = result.deleted_count
+            
+        app.logger.info(f"Cleaned up old tokens: {summary}")
+        return jsonify({
+            "message": "Cleanup completed",
+            "deleted_counts": summary,
+            "threshold": six_hours_ago.isoformat()
+        }), 200
+    except Exception as e:
+        app.logger.error(f"Error cleaning up tokens: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)

@@ -1,0 +1,44 @@
+modules = ["python-3.11"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+packages = ["cacert", "gmp", "grpc"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Flask API"
+
+[[workflows.workflow]]
+name = "Flask API"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python app.py"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["gunicorn", "--bind", "0.0.0.0:5000", "app:app"]
+
+[userenv]
+
+[userenv.shared]
+MONGODB_URI = "mongodb+srv://mohitsindhu122_db_user:wIhJ9x4i890SDIzk@uidbypass.v6khwik.mongodb.net/?retryWrites=true&w=majority&appName=uidbypass"

@@ -1,3 +1,4 @@
+
 import json
 import time
 import asyncio
@@ -8,8 +9,8 @@ import requests
 from typing import Dict, Optional
 
 # --- Settings ---
-RELEASEVERSION = "OB50"
-USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 13; CPH2095 Build/RKQ1.211119.001)"
+RELEASEVERSION = "OB52"
+USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 14; Pixel 9 Pro Build/AD1A.240505.001)"
 TELEGRAM_TOKEN = "7848747358:AAHuiPoYbBfnTTDyI8GJJziIsdqAhNK5Qvg"
 TELEGRAM_CHAT_ID = 8254557388
 BRANCH_NAME = "main"
