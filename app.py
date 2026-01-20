@@ -1,5 +1,4 @@
-from dotenv import load_dotenv
-load_dotenv()  # ← This loads your .env file
+
 
 from flask import Flask, request, jsonify
 import asyncio
