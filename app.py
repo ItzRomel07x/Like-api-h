@@ -1,4 +1,25 @@
+from dotenv import load_dotenv
+load_dotenv()  # ← This loads your .env file
 
+from flask import Flask, request, jsonify
+import asyncio
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
+from google.protobuf.json_format import MessageToJson
+import binascii
+import aiohttp
+import requests
+import json
+import os
+import random
+import uuid
+import string
+from datetime import datetime, date, timedelta
+from pymongo import MongoClient
+import like_pb2
+import like_count_pb2
+import uid_generator_pb2
+from google.protobuf.message import DecodeError
 
 from flask import Flask, request, jsonify
 import asyncio
