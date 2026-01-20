@@ -21,8 +21,7 @@ import uid_generator_pb2
 from google.protobuf.message import DecodeError
 
 app = Flask(__name__)
-from dotenv import load_dotenv
-load_dotenv()
+
 
 MONGODB_URI = os.environ.get('MONGODB_URI')
 mongo_client = None
